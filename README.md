@@ -1,0 +1,105 @@
+# Canvas Split Assignment
+
+Split rubric-graded Canvas assignments into **one “No Submission” assignment per CLO**
+and post each student's rubric points per CLO.
+
+For every assignment you select, the tool:
+
+1. reads the assignment's rubric and extracts a CLO from each criterion using a
+   regular expression you provide;
+2. creates one **No Submission** assignment per unique CLO, named
+   `<assignment name> - [<CLO>]` — points possible equal the CLO's rubric points,
+   **unpublished**, counted toward the final grade;
+3. walks the graded submissions, splits each student's rubric points per CLO, and
+   posts the totals as that student's grade in the matching CLO assignment.
+
+### Grade-integrity rules
+
+* A submission is only split when its recorded grade equals the total of its
+  rubric assessment (within `0.01` points).
+* If the grade is lower than the rubric total by **exactly** the automatic
+  late/missing penalty (`points_deducted`), the submission is kept and the
+  penalty is **spread evenly across the CLOs** (rounding remainder goes to the
+  largest CLO so the totals always add up to the recorded grade).
+* Anything else — extra credit, manual override, a rubric not used for grading —
+  is **warned about and skipped**, so the CLO columns always reconcile with the
+  gradebook.
+* Ungraded, excused, and rubric-less submissions are counted and reported, never posted.
+* Rubric criteria the pattern cannot match are excluded and reported.
+
+Re-running is safe: an assignment named `<assignment name> - [<CLO>]` that already
+exists in the course is **reused** instead of duplicated.
+
+## Install
+
+As a global command with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install .
+```
+
+That gives you `canvas-split-assignment` (alias: `canvas-clo-split`).
+
+Or run it straight from the project without installing:
+
+```bash
+uv run canvas-clo-split            # or: uv run canvas-split-assignment
+uv run python -m canvas_split_assignment
+```
+
+## Usage
+
+```bash
+canvas-clo-split
+```
+
+You will be prompted for:
+
+1. **Canvas base URL** — e.g. `https://canvas.school.edu` (a missing scheme or a
+   trailing `/api/v1` is fixed for you; `CANVAS_BASE_URL` is offered as default).
+2. **Access token** — a Canvas API token with grading rights
+   (`CANVAS_ACCESS_TOKEN` is offered if set).
+3. **CLO regex** — a pattern that captures just the CLO in a rubric criterion's
+   description, e.g. `(CLO\s*\d+)` or `CLO[:\s-]*(\S+)`. Group 1 is used as the
+   CLO (the whole match if the pattern has no group). The criterion's
+   `description` is tried first, then `long_description`.
+4. **Courses** — multi-select (space to toggle, enter to confirm).
+5. **Assignments** — multi-select per course; assignments with a rubric are marked.
+
+Then review the plan and confirm. A full summary (created/reused assignments,
+students graded, points posted, warnings, errors) is printed at the end.
+
+### Options
+
+| Flag | Effect |
+| --- | --- |
+| `--url URL` | Canvas base URL (skips the prompt) |
+| `--token TOKEN` | Canvas API access token (skips the prompt) |
+| `--pattern REGEX` | CLO capture pattern (skips the prompt) |
+| `--dry-run` | build and show the plan; create/post nothing |
+| `--yes` | skip the final confirmation prompt |
+
+Tip: run `canvas-clo-split --dry-run` first to see exactly what would be created.
+
+Exit codes: `0` success, `1` aborted/connection failure, `2` finished with errors.
+
+## Development
+
+```bash
+uv sync --group dev     # install deps + pytest
+uv run pytest           # run the test suite (unit + API-mocked end-to-end)
+```
+
+Layout:
+
+```
+src/canvas_split_assignment/
+  api.py       Canvas REST client (pagination, retries, error mapping)
+  models.py    shared dataclasses
+  scoring.py   pure CLO mapping / per-submission scoring logic
+  ui.py        rich rendering + questionary prompts
+  cli.py       prompts, planning, execution, entry point
+tests/
+  test_core.py       unit tests for the scoring rules
+  test_pipeline.py   end-to-end tests against a fake Canvas API
+```
