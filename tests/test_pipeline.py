@@ -262,7 +262,7 @@ def test_reuses_existing_assignment_with_the_same_name(monkeypatch):
     ]
 
 
-def test_dry_run_changes_nothing(monkeypatch):
+def test_dry_run_writes_nothing_but_projects_results(monkeypatch):
     fake = make_canvas()
     patch_transport(monkeypatch, fake)
     ui = FakeUi(checkbox_answers=[[1], [10]])
@@ -271,9 +271,21 @@ def test_dry_run_changes_nothing(monkeypatch):
     code = run(ui, make_args(dry_run=True), report)
 
     assert code == 0
+    # nothing was written to Canvas
     assert fake.created == []
     assert fake.graded == []
     assert all(t.action == "would create" for t in report.plans[0].targets)
+    # ...but the submissions were analysed so the summary can project the outcome
+    stats = report.plans[0].stats
+    assert stats.graded_submissions == 3
+    assert stats.skipped_ungraded == 1
+    assert stats.skipped_score_mismatch == 1
+    assert stats.grades_posted == 4  # projected
+    by_clo = {t.clo: t for t in report.plans[0].targets}
+    assert by_clo["CLO1"].students_graded == 2
+    assert by_clo["CLO1"].points_posted == 17.5
+    assert by_clo["CLO2"].students_graded == 2
+    assert by_clo["CLO2"].points_posted == 17.5
 
 
 def test_assignment_without_rubric_is_skipped_with_warning(monkeypatch):

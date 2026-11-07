@@ -173,8 +173,14 @@ def execute_plan(
     client: CanvasClient,
     plan: AssignmentPlan,
     pattern: re.Pattern[str],
+    *,
+    dry_run: bool = False,
 ) -> None:
-    """Create the CLO assignments and post the per-student totals."""
+    """Create the CLO assignments and post the per-student totals.
+
+    With ``dry_run=True`` nothing is written to Canvas: the submissions are
+    still fetched and scored so the summary can show projected numbers.
+    """
     stats = plan.stats
     if not plan.is_processable:
         return
@@ -182,44 +188,51 @@ def execute_plan(
     course_id = plan.course.id
 
     # 1. resolve/create the CLO assignments -------------------------------- #
-    for target in plan.targets:
-        if target.existing_assignment_id is not None:
-            target.assignment_id = target.existing_assignment_id
-            target.action = "reused"
-            continue
-        description = (
-            f"<p>Auto-generated CLO breakdown of "
-            f"<strong>{html.escape(plan.assignment_name)}</strong>. "
-            f"The grade in this column is the total rubric points a student earned for "
-            f"<strong>{html.escape(target.clo)}</strong>.</p>"
-        )
-        data = {
-            "assignment[name]": target.name,
-            "assignment[submission_types][]": "none",
-            "assignment[grading_type]": "points",
-            "assignment[points_possible]": format_points(target.points_possible),
-            "assignment[published]": "false",
-            "assignment[omit_from_final_grade]": "false",
-            "assignment[description]": description,
-        }
-        try:
-            with ui.status(f"Creating '{target.name}' …"):
-                created = client.create_assignment(course_id, data)
-        except CanvasError as exc:
-            target.action = "failed"
-            plan.errors.append(f"could not create '{target.name}': {exc}")
-            continue
-        target.assignment_id = int(created.get("id") or 0) or None
-        target.action = "created" if target.assignment_id else "failed"
-        if target.assignment_id is None:
-            plan.errors.append(f"Canvas did not return an id for '{target.name}'")
+    if dry_run:
+        for target in plan.targets:
+            target.action = (
+                "would create" if target.existing_assignment_id is None else "would reuse"
+            )
+        live_targets = list(plan.targets)
+    else:
+        for target in plan.targets:
+            if target.existing_assignment_id is not None:
+                target.assignment_id = target.existing_assignment_id
+                target.action = "reused"
+                continue
+            description = (
+                f"<p>Auto-generated CLO breakdown of "
+                f"<strong>{html.escape(plan.assignment_name)}</strong>. "
+                f"The grade in this column is the total rubric points a student earned for "
+                f"<strong>{html.escape(target.clo)}</strong>.</p>"
+            )
+            data = {
+                "assignment[name]": target.name,
+                "assignment[submission_types][]": "none",
+                "assignment[grading_type]": "points",
+                "assignment[points_possible]": format_points(target.points_possible),
+                "assignment[published]": "false",
+                "assignment[omit_from_final_grade]": "false",
+                "assignment[description]": description,
+            }
+            try:
+                with ui.status(f"Creating '{target.name}' …"):
+                    created = client.create_assignment(course_id, data)
+            except CanvasError as exc:
+                target.action = "failed"
+                plan.errors.append(f"could not create '{target.name}': {exc}")
+                continue
+            target.assignment_id = int(created.get("id") or 0) or None
+            target.action = "created" if target.assignment_id else "failed"
+            if target.assignment_id is None:
+                plan.errors.append(f"Canvas did not return an id for '{target.name}'")
 
-    live_targets = [
-        t for t in plan.targets if t.assignment_id and t.action in ("created", "reused")
-    ]
-    if not live_targets:
-        plan.errors.append("no CLO assignment could be created — nothing was posted")
-        return
+        live_targets = [
+            t for t in plan.targets if t.assignment_id and t.action in ("created", "reused")
+        ]
+        if not live_targets:
+            plan.errors.append("no CLO assignment could be created — nothing was posted")
+            return
 
     # 2. fetch submissions ------------------------------------------------- #
     try:
@@ -279,7 +292,7 @@ def execute_plan(
             + " — those points were not posted"
         )
 
-    # 4. post grades ------------------------------------------------------ #
+    # 4. post grades (or project them on a dry run) ----------------------- #
     planned_posts = [
         (target, submission, name, points)
         for submission, totals, name in posts
@@ -288,6 +301,13 @@ def execute_plan(
     ]
     if not planned_posts:
         plan.warnings.append("no grades to post")
+        return
+
+    if dry_run:
+        for target, _submission, _name, points in planned_posts:
+            stats.grades_posted += 1
+            target.students_graded += 1
+            target.points_posted += float(points)
         return
 
     with ui.progress(len(planned_posts), f"Posting grades for '{plan.assignment_name}'") as tick:
@@ -436,15 +456,13 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
         render_plan(ui, report.plans)
 
         if args.dry_run:
-            for plan in processable:
-                for target in plan.targets:
-                    target.action = (
-                        "would create" if target.existing_assignment_id is None else "would reuse"
-                    )
+            for plan in report.plans:
+                execute_plan(ui, client, plan, pattern, dry_run=True)
             render_summary(ui, report)
             ui.console.print(
                 Panel(
-                    "Dry run only — no assignments were created and no grades were posted.",
+                    "Dry run only — no assignments were created and no grades were posted. "
+                    "Student counts and points above are projections.",
                     border_style="yellow",
                     box=box.ROUNDED,
                 )

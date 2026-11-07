@@ -206,7 +206,7 @@ def render_summary(ui: Ui, report: RunReport) -> None:
     table.add_column("CLO assignment")
     table.add_column("Action")
     table.add_column("Students", justify="right")
-    table.add_column("Points posted", justify="right")
+    table.add_column("Points projected" if report.dry_run else "Points posted", justify="right")
 
     totals = AssignmentRunStats()
     created = reused = failed = 0
@@ -237,20 +237,17 @@ def render_summary(ui: Ui, report: RunReport) -> None:
             )
             continue
         for target in plan.targets:
-            if target.action == "created":
+            if target.action in ("created", "would create"):
                 created += 1
-            elif target.action == "reused":
+            elif target.action in ("reused", "would reuse"):
                 reused += 1
             elif target.action == "failed":
                 failed += 1
             suffix = f" (#{target.assignment_id})" if target.assignment_id else ""
-            if report.dry_run:
-                points = "—"
-            else:
-                points = (
-                    f"{format_points(target.points_posted)} / "
-                    f"{format_points(target.points_possible)}"
-                )
+            points = (
+                f"{format_points(target.points_posted)} / "
+                f"{format_points(target.points_possible)}"
+            )
             table.add_row(
                 escape(plan.course.label),
                 escape(plan.assignment_name),
@@ -288,12 +285,14 @@ def render_summary(ui: Ui, report: RunReport) -> None:
             ui.info(f"{plan.course.label} / {plan.assignment_name}: " + " · ".join(notes))
 
     mode = "would be created" if report.dry_run else "created"
+    reuse_word = "would be reused" if report.dry_run else "reused"
+    grades_word = "grade(s) projected" if report.dry_run else "grade(s) posted"
     ui.console.print(
         Panel(
             f"[bold]{totals.graded_submissions}[/] graded submission(s) analysed · "
             f"[bold]{created}[/] assignment(s) {mode} · "
-            f"[bold]{reused}[/] reused · [bold]{failed}[/] failed · "
-            f"[bold]{totals.grades_posted}[/] grade(s) posted"
+            f"[bold]{reused}[/] {reuse_word} · [bold]{failed}[/] failed · "
+            f"[bold]{totals.grades_posted}[/] {grades_word}"
             + (f" · [red]{totals.grades_failed}[/] failed" if totals.grades_failed else "")
             + (
                 f" · [yellow]{totals.late_penalties}[/] late penalty/penalties applied"

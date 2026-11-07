@@ -79,11 +79,12 @@ students graded, points posted, warnings, errors) is printed at the end.
 | `--url URL` | Canvas base URL (skips the prompt) |
 | `--token TOKEN` | Canvas API access token (skips the prompt) |
 | `--pattern REGEX` | CLO capture pattern (skips the prompt) |
-| `--dry-run` | build and show the plan; create/post nothing |
+| `--dry-run` | build the plan and project results without creating assignments or posting grades |
 | `--all-courses` | also list archived/concluded courses (hidden by default) |
 | `--yes` | skip the final confirmation prompt |
 
-Tip: run `canvas-clo-split --dry-run` first to see exactly what would be created.
+Tip: run `canvas-clo-split --dry-run` first to see exactly what would be created
+and the projected per-student CLO totals — nothing is written to Canvas.
 
 Exit codes: `0` success, `1` aborted/connection failure, `2` finished with errors.
 
