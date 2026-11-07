@@ -65,13 +65,20 @@ class Ui:
 
     # -- prompts ----------------------------------------------------------- #
 
-    def text(self, message: str, *, default: str = "", instruction: str | None = None) -> str:
+    def text(
+        self,
+        message: str,
+        *,
+        default: str = "",
+        instruction: str | None = None,
+        allow_empty: bool = False,
+    ) -> str:
         while True:
             answer = questionary.text(
                 message, default=default, instruction=instruction
             ).unsafe_ask()
             answer = (answer or "").strip()
-            if answer:
+            if answer or allow_empty:
                 return answer
             self.warn("Please enter a value.")
 
@@ -96,6 +103,7 @@ class Ui:
                     f"{message} [{len(shown)} items] — type text to filter, "
                     "or press Enter to show all",
                     default="",
+                    allow_empty=True,
                 )
                 if needle:
                     lowered = needle.lower()
