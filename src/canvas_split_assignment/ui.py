@@ -206,7 +206,12 @@ def render_summary(ui: Ui, report: RunReport) -> None:
     table.add_column("CLO assignment")
     table.add_column("Action")
     table.add_column("Students", justify="right")
-    table.add_column("Points projected" if report.dry_run else "Points posted", justify="right")
+    if report.dry_run:
+        table.add_column("Avg / max (projected)", justify="right")
+        table.add_column("Total (projected)", justify="right")
+    else:
+        table.add_column("Avg / max", justify="right")
+        table.add_column("Total posted", justify="right")
 
     totals = AssignmentRunStats()
     created = reused = failed = 0
@@ -234,6 +239,7 @@ def render_summary(ui: Ui, report: RunReport) -> None:
                 "-",
                 "-",
                 "-",
+                "-",
             )
             continue
         for target in plan.targets:
@@ -244,10 +250,9 @@ def render_summary(ui: Ui, report: RunReport) -> None:
             elif target.action == "failed":
                 failed += 1
             suffix = f" (#{target.assignment_id})" if target.assignment_id else ""
-            points = (
-                f"{format_points(target.points_posted)} / "
-                f"{format_points(target.points_possible)}"
-            )
+            avg = target.points_posted / target.students_graded if target.students_graded else 0.0
+            avg_text = f"{format_points(avg)} / {format_points(target.points_possible)}"
+            total_text = format_points(target.points_posted)
             table.add_row(
                 escape(plan.course.label),
                 escape(plan.assignment_name),
@@ -255,7 +260,8 @@ def render_summary(ui: Ui, report: RunReport) -> None:
                 escape(target.name + suffix),
                 escape(target.action),
                 str(target.students_graded),
-                points,
+                avg_text,
+                total_text,
             )
     ui.console.print(table)
 

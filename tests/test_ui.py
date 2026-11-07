@@ -1,6 +1,7 @@
 """Regression tests for the interactive UI (prompt handling, not rendering)."""
 
 import contextlib
+import io
 
 import pytest
 from rich.console import Console
@@ -109,3 +110,84 @@ def test_text_allows_empty_when_asked(scripted_ui):
 
     assert ui.text("Prompt", allow_empty=True) == ""
     assert len(asked) == 1
+
+
+# --------------------------------------------------------------------------- #
+# summary rendering
+# --------------------------------------------------------------------------- #
+
+
+def test_summary_shows_average_and_total_separately():
+    """Regression: never pair the class total with the per-student max in one cell."""
+    from canvas_split_assignment.models import (
+        AssignmentPlan,
+        CloTarget,
+        CourseInfo,
+        RunReport,
+    )
+    from canvas_split_assignment.ui import render_summary
+
+    console = Console(file=io.StringIO(), width=250, force_terminal=False)
+    ui = Ui(console)
+    plan = AssignmentPlan(
+        course=CourseInfo(id=1, name="Lab", code="CMPE 270L-1"),
+        assignment_id=10,
+        assignment_name="Assignment 1 - Submission",
+        targets=[
+            CloTarget(
+                clo="B1",
+                name="Assignment 1 - Submission - [B1]",
+                points_possible=15.0,
+                assignment_id=501,
+                action="created",
+                students_graded=20,
+                points_posted=296.26,
+            )
+        ],
+    )
+    report = RunReport(plans=[plan])
+    render_summary(ui, report)
+    out = console.file.getvalue()
+
+    assert "Avg / max" in out
+    assert "Total posted" in out
+    # per-student average vs per-student max
+    assert "14.81 / 15" in out
+    # the class-wide total has its own column
+    assert "296.26" in out
+    assert "296.26 / 15" not in out
+
+
+def test_summary_labels_dry_run_columns_as_projected():
+    from canvas_split_assignment.models import (
+        AssignmentPlan,
+        CloTarget,
+        CourseInfo,
+        RunReport,
+    )
+    from canvas_split_assignment.ui import render_summary
+
+    console = Console(file=io.StringIO(), width=250, force_terminal=False)
+    ui = Ui(console)
+    plan = AssignmentPlan(
+        course=CourseInfo(id=1, name="Lab", code="X"),
+        assignment_id=10,
+        assignment_name="HW",
+        targets=[
+            CloTarget(
+                clo="B1",
+                name="HW - [B1]",
+                points_possible=15.0,
+                action="would create",
+                students_graded=2,
+                points_posted=17.5,
+            )
+        ],
+    )
+    report = RunReport(dry_run=True, plans=[plan])
+    render_summary(ui, report)
+    out = console.file.getvalue()
+
+    assert "Avg / max (projected)" in out
+    assert "Total (projected)" in out
+    assert "8.75 / 15" in out
