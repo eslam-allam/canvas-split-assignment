@@ -250,6 +250,9 @@ def render_summary(ui: Ui, report: RunReport) -> None:
             elif target.action == "failed":
                 failed += 1
             suffix = f" (#{target.assignment_id})" if target.assignment_id else ""
+            action_text = target.action
+            if target.published_by_tool:
+                action_text += " · published"
             avg = target.points_posted / target.students_graded if target.students_graded else 0.0
             avg_text = f"{format_points(avg)} / {format_points(target.points_possible)}"
             total_text = format_points(target.points_posted)
@@ -258,7 +261,7 @@ def render_summary(ui: Ui, report: RunReport) -> None:
                 escape(plan.assignment_name),
                 escape(target.clo),
                 escape(target.name + suffix),
-                escape(target.action),
+                escape(action_text),
                 str(target.students_graded),
                 avg_text,
                 total_text,
@@ -293,6 +296,9 @@ def render_summary(ui: Ui, report: RunReport) -> None:
     mode = "would be created" if report.dry_run else "created"
     reuse_word = "would be reused" if report.dry_run else "reused"
     grades_word = "grade(s) projected" if report.dry_run else "grade(s) posted"
+    published_count = sum(
+        1 for p in report.plans for t in p.targets if t.published_by_tool
+    )
     ui.console.print(
         Panel(
             f"[bold]{totals.graded_submissions}[/] graded submission(s) analysed · "
@@ -303,6 +309,11 @@ def render_summary(ui: Ui, report: RunReport) -> None:
             + (
                 f" · [yellow]{totals.late_penalties}[/] late penalty/penalties applied"
                 if totals.late_penalties
+                else ""
+            )
+            + (
+                f" · [yellow]{published_count}[/] published for grading"
+                if published_count
                 else ""
             ),
             title="Totals",

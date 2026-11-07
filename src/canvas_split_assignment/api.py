@@ -178,8 +178,10 @@ class CanvasClient:
                 )
             if status == 403:
                 raise CanvasAPIError(
-                    f"Permission denied (403) for {method} {url}. "
-                    "You need grading rights (teacher/TA/admin) in this course.",
+                    f"Permission denied (403) for {method} {url}: {_error_message(response)}. "
+                    "Likely causes: the assignment is unpublished (Canvas only accepts grades "
+                    "on published assignments) or your token cannot manage grades in this "
+                    "course (teacher/TA/admin required).",
                     status=status,
                 )
             if status == 404:
@@ -293,6 +295,13 @@ class CanvasClient:
         if not isinstance(payload, dict):
             raise CanvasAPIError("Unexpected response when creating an assignment.")
         return payload
+
+    def update_assignment(self, course_id: int, assignment_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Edit an assignment (used to publish it: PUT with assignment[published])."""
+        path = f"/courses/{course_id}/assignments/{assignment_id}"
+        response = self._request("PUT", path, data=data)
+        payload = self._json(response, self._url(path))
+        return payload if isinstance(payload, dict) else {}
 
     def post_grade(
         self, course_id: int, assignment_id: int, user_id: int, points: float

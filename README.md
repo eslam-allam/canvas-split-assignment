@@ -9,9 +9,15 @@ For every assignment you select, the tool:
    regular expression you provide;
 2. creates one **No Submission** assignment per unique CLO, named
    `<assignment name> - [<CLO>]` — points possible equal the CLO's rubric points,
-   **unpublished**, counted toward the final grade;
+   counted toward the final grade;
 3. walks the graded submissions, splits each student's rubric points per CLO, and
    posts the totals as that student's grade in the matching CLO assignment.
+
+> **Note on publishing:** Canvas rejects grades on unpublished assignments
+> (403 "This assignment is still unpublished" — `Submission#can_grade_symbolic_status`),
+> so each CLO assignment is **published automatically right before** its grades are
+> posted. To keep the new columns and grades hidden from students longer, set the
+> course's grade posting policy to *Manual* before running.
 
 ### Grade-integrity rules
 

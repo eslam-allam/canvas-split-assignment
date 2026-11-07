@@ -7,10 +7,12 @@ import re
 from urllib.parse import parse_qs
 
 import httpx
+import pytest
 from rich.console import Console
 
 from canvas_split_assignment.api import CanvasClient
 from canvas_split_assignment.cli import run
+from canvas_split_assignment.errors import CanvasError
 from canvas_split_assignment.models import RunReport
 from canvas_split_assignment.ui import Ui
 
@@ -51,7 +53,11 @@ class FakeUi(Ui):
 
 
 class FakeCanvas:
-    """In-memory Canvas API."""
+    """In-memory Canvas API.
+
+    Enforces the real Canvas rule that grades cannot be posted to unpublished
+    assignments (403 "This assignment is still unpublished").
+    """
 
     def __init__(self, *, course_pages, assignments, details, submissions):
         self.course_pages = course_pages
@@ -60,6 +66,13 @@ class FakeCanvas:
         self.submissions = submissions
         self.created: list[dict] = []
         self.graded: list[tuple[int, int, str]] = []
+        self.published: list[tuple[int, bool]] = []  # (assignment_id, published)
+        self.events: list[tuple] = []  # ("publish", id) / ("grade", aid, uid)
+        self.publish_state: dict[int, bool] = {
+            int(a["id"]): bool(a.get("published", True))
+            for items in assignments.values()
+            for a in items
+        }
         self.transport = httpx.MockTransport(self._handle)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
@@ -80,8 +93,12 @@ class FakeCanvas:
         if match and method == "GET":
             return httpx.Response(200, json=self.assignments.get(int(match.group(1)), []))
         if match and method == "POST":
-            self.created.append(parse_qs(request.content.decode()))
-            return httpx.Response(200, json={"id": 500 + len(self.created)})
+            form = parse_qs(request.content.decode())
+            self.created.append(form)
+            new_id = 500 + len(self.created)
+            self.publish_state[new_id] = form.get("assignment[published]", ["false"])[0] == "true"
+            self.events.append(("create", form["assignment[name]"][0]))
+            return httpx.Response(200, json={"id": new_id})
 
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)", path)
         if match and method == "GET":
@@ -89,6 +106,14 @@ class FakeCanvas:
             if detail is None:
                 return httpx.Response(404, json={"errors": [{"message": "not found"}]})
             return httpx.Response(200, json=detail)
+        if match and method == "PUT":
+            form = parse_qs(request.content.decode())
+            aid = int(match.group(2))
+            state = form.get("assignment[published]", ["true"])[0] == "true"
+            self.publish_state[aid] = state
+            self.published.append((aid, state))
+            self.events.append(("publish", aid))
+            return httpx.Response(200, json={"id": aid, "published": state})
 
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)/submissions", path)
         if match and method == "GET":
@@ -96,9 +121,20 @@ class FakeCanvas:
 
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)/submissions/(\d+)", path)
         if match and method == "PUT":
+            aid = int(match.group(2))
+            if not self.publish_state.get(aid, True):
+                # Canvas's real behavior: grades on unpublished assignments are 403
+                return httpx.Response(
+                    403,
+                    json={
+                        "errors": [{"message": "This assignment is still unpublished"}],
+                        "error_message": "This assignment is still unpublished",
+                    },
+                )
             form = parse_qs(request.content.decode())
             grade = form["submission[posted_grade]"][0]
-            self.graded.append((int(match.group(2)), int(match.group(3)), grade))
+            self.graded.append((aid, int(match.group(3)), grade))
+            self.events.append(("grade", aid, int(match.group(3))))
             return httpx.Response(200, json={"id": 1, "posted_at": "2026-01-01"})
 
         return httpx.Response(404, json={"errors": [{"message": f"unhandled {method} {path}"}]})
@@ -230,6 +266,13 @@ def test_full_run_creates_assignments_and_posts_grades(monkeypatch):
         (clo2_id, 8, "7.5"),
     ]
 
+    # both drafts were published before any grade was posted (Canvas requirement)
+    assert sorted(fake.published) == [(501, True), (502, True)]
+    for aid in (501, 502):
+        publish_at = fake.events.index(("publish", aid))
+        grade_at = fake.events.index(("grade", aid, 7))
+        assert publish_at < grade_at
+
     stats = report.plans[0].stats
     assert stats.graded_submissions == 3
     assert stats.skipped_ungraded == 1
@@ -240,11 +283,15 @@ def test_full_run_creates_assignments_and_posts_grades(monkeypatch):
     assert stats.grades_failed == 0
     # Ann's mismatch is called out by name
     assert any("Ann" in w and "17" in w and "18" in w for w in report.plans[0].warnings)
+    # the auto-publish is called out
+    assert any("published 'Homework 1 - [CLO1]'" in w for w in report.plans[0].warnings)
 
 
 def test_reuses_existing_assignment_with_the_same_name(monkeypatch):
     fake = make_canvas(
-        extra_assignments=[{"id": 99, "name": "Homework 1 - [CLO1]", "points_possible": 10.0}]
+        extra_assignments=[
+            {"id": 99, "name": "Homework 1 - [CLO1]", "points_possible": 10.0, "published": True}
+        ]
     )
     patch_transport(monkeypatch, fake)
     ui = FakeUi(checkbox_answers=[[1], [10]])
@@ -260,6 +307,45 @@ def test_reuses_existing_assignment_with_the_same_name(monkeypatch):
         (501, 7, "10"),
         (501, 8, "7.5"),
     ]
+    # an already-published reused assignment is left alone
+    assert all(aid != 99 for aid, _state in fake.published)
+
+
+def test_unpublished_reused_assignment_is_published_before_grading(monkeypatch):
+    fake = make_canvas(
+        extra_assignments=[
+            {"id": 99, "name": "Homework 1 - [CLO1]", "points_possible": 10.0, "published": False}
+        ]
+    )
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+    report = RunReport()
+
+    code = run(ui, make_args(), report)
+
+    assert code == 0
+    # Canvas would 403 otherwise: #99 must be published before its first grade
+    assert (99, True) in fake.published
+    publish_at = fake.events.index(("publish", 99))
+    grade_at = fake.events.index(("grade", 99, 7))
+    assert publish_at < grade_at
+    assert (99, 7, "10") in fake.graded
+    assert any("unpublished" in w and "published before grading" in w for w in report.plans[0].warnings)
+
+
+def test_403_error_surfaces_canvas_message(monkeypatch):
+    """Regression: never swallow Canvas's reason behind a generic hint."""
+    fake = make_canvas()
+    patch_transport(monkeypatch, fake)
+    client = CanvasClient("https://canvas.test", "token")
+    fake.publish_state[501] = False  # grading an unpublished assignment -> 403
+
+    with pytest.raises(CanvasError) as excinfo:
+        client.post_grade(1, 501, 7, 10.0)
+
+    message = str(excinfo.value)
+    assert "This assignment is still unpublished" in message  # Canvas's own words
+    assert "unpublished" in message  # plus the likely-causes hint
 
 
 def test_dry_run_writes_nothing_but_projects_results(monkeypatch):
@@ -274,6 +360,7 @@ def test_dry_run_writes_nothing_but_projects_results(monkeypatch):
     # nothing was written to Canvas
     assert fake.created == []
     assert fake.graded == []
+    assert fake.published == []
     assert all(t.action == "would create" for t in report.plans[0].targets)
     # ...but the submissions were analysed so the summary can project the outcome
     stats = report.plans[0].stats

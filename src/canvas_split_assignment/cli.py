@@ -114,6 +114,7 @@ def plan_assignment(
     detail: dict[str, Any],
     pattern: re.Pattern[str],
     existing_by_name: dict[str, int],
+    existing_published: dict[str, bool] | None = None,
 ) -> AssignmentPlan:
     """Work out which CLO assignments a source assignment needs."""
     assignment_id = int(detail.get("id") or 0)
@@ -150,13 +151,18 @@ def plan_assignment(
             "possible duplicate CLO labels: " + ", ".join(f"'{v}'" for v in variants)
         )
 
-    targets, name_warnings = build_targets(source_name, mapped, existing_by_name)
+    targets, name_warnings = build_targets(source_name, mapped, existing_by_name, existing_published)
     plan.warnings.extend(name_warnings)
     for target in targets:
         if target.existing_assignment_id is not None:
             plan.warnings.append(
                 f"an assignment named '{target.name}' already exists "
                 f"(#{target.existing_assignment_id}) — it will be reused"
+            )
+        if target.existing_assignment_id is not None and not target.published:
+            plan.warnings.append(
+                f"'{target.name}' is unpublished — it will be published before grading "
+                "(Canvas only accepts grades on published assignments)"
             )
     plan.mapping = {c.criterion_id: c for c in mapped}
     plan.targets = targets
@@ -310,8 +316,39 @@ def execute_plan(
             target.points_posted += float(points)
         return
 
-    with ui.progress(len(planned_posts), f"Posting grades for '{plan.assignment_name}'") as tick:
-        for target, submission, name, points in planned_posts:
+    # Canvas rejects grades on unpublished assignments (403 "This assignment is
+    # still unpublished"), so publish each target once, before grading it.
+    publish_failed: set[int] = set()
+    for target in live_targets:
+        if target.published or not any(t is target for t, *_ in planned_posts):
+            continue
+        try:
+            with ui.status(f"Publishing '{target.name}' …"):
+                client.update_assignment(
+                    course_id,
+                    int(target.assignment_id),
+                    {"assignment[published]": "true"},
+                )
+        except CanvasError as exc:
+            publish_failed.add(id(target))
+            plan.errors.append(
+                f"could not publish '{target.name}' — no grades were posted to it "
+                f"(Canvas only accepts grades on published assignments): {exc}"
+            )
+            continue
+        target.published = True
+        target.published_by_tool = True
+        plan.warnings.append(
+            f"published '{target.name}' — Canvas only accepts grades on published assignments"
+        )
+
+    posts_for_grading = [p for p in planned_posts if id(p[0]) not in publish_failed]
+    stats.grades_failed += len(planned_posts) - len(posts_for_grading)
+    if not posts_for_grading:
+        return
+
+    with ui.progress(len(posts_for_grading), f"Posting grades for '{plan.assignment_name}'") as tick:
+        for target, submission, name, points in posts_for_grading:
             try:
                 client.post_grade(
                     course_id, int(target.assignment_id), int(submission.get("user_id")), points
@@ -395,7 +432,7 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
             return 0
 
         ui.step(4, 6, "Select assignments")
-        work: list[tuple[CourseInfo, dict[str, Any], dict[str, int]]] = []
+        work: list[tuple[CourseInfo, dict[str, Any], dict[str, int], dict[str, bool]]] = []
         for course in selected_courses:
             try:
                 with ui.status(f"Fetching assignments of {course.label} …"):
@@ -407,10 +444,12 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
                 ui.warn(f"{course.label} has no assignments.")
                 continue
             existing_by_name: dict[str, int] = {}
+            existing_published: dict[str, bool] = {}
             choices: list[tuple[str, Any]] = []
             for item in assignments:
                 name = str(item.get("name") or f"assignment {item.get('id')}")
                 existing_by_name.setdefault(name, int(item.get("id") or 0))
+                existing_published.setdefault(name, bool(item.get("published")))
                 points = item.get("points_possible")
                 marker = "  ✓ rubric" if item.get("rubric") else ""
                 choices.append(
@@ -425,13 +464,13 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
             for assignment_id in picked:
                 item = by_id.get(int(assignment_id))
                 if item is not None:
-                    work.append((course, item, existing_by_name))
+                    work.append((course, item, existing_by_name, existing_published))
         if not work:
             ui.warn("No assignments selected — nothing to do.")
             return 0
 
         ui.step(5, 6, "Review plan")
-        for course, item, existing_by_name in work:
+        for course, item, existing_by_name, existing_published in work:
             assignment_id = int(item.get("id") or 0)
             try:
                 with ui.status(f"Reading rubric of '{item.get('name')}' …"):
@@ -445,7 +484,7 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
                 plan.errors.append(f"could not read the assignment: {exc}")
                 report.plans.append(plan)
                 continue
-            plan = plan_assignment(course, detail, pattern, existing_by_name)
+            plan = plan_assignment(course, detail, pattern, existing_by_name, existing_published)
             report.plans.append(plan)
 
         processable = [p for p in report.plans if p.is_processable]
@@ -479,7 +518,9 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
             message = (
                 f"Create {new_count} assignment(s)"
                 + (f", reuse {reuse_count}" if reuse_count else "")
-                + " and post per-student CLO grades? They will stay unpublished."
+                + " and post per-student CLO grades? Note: Canvas only accepts grades on "
+                "published assignments, so each CLO assignment will be published as it is "
+                "graded (hide results from students with a manual grade posting policy)."
             )
             if not ui.confirm(message, default=True):
                 ui.warn("Aborted before any change was made.")

@@ -98,9 +98,11 @@ def build_targets(
     source_name: str,
     mapped: Sequence[CriterionClo],
     existing_by_name: dict[str, int],
+    existing_published: dict[str, bool] | None = None,
 ) -> tuple[list[CloTarget], list[str]]:
     """Group mapped criteria into one CloTarget per unique CLO."""
     warnings: list[str] = []
+    existing_published = existing_published or {}
     ordered: dict[str, CloTarget] = {}
     for criterion in mapped:
         target = ordered.get(criterion.clo)
@@ -112,10 +114,12 @@ def build_targets(
                     "and will be truncated"
                 )
                 name = name[:MAX_NAME_LENGTH]
+            existing_id = existing_by_name.get(name)
             target = CloTarget(
                 clo=criterion.clo,
                 name=name,
-                existing_assignment_id=existing_by_name.get(name),
+                existing_assignment_id=existing_id,
+                published=bool(existing_published.get(name)) if existing_id is not None else False,
             )
             ordered[criterion.clo] = target
         target.points_possible += criterion.points

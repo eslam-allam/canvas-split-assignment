@@ -47,9 +47,12 @@ class CloTarget:
     points_possible: float = 0.0
     criteria_ids: list[str] = field(default_factory=list)
     existing_assignment_id: int | None = None
+    #: Canvas published state (new targets start as drafts, reused ones come from the listing)
+    published: bool = False
     # filled during execution
     assignment_id: int | None = None
     action: str = "planned"  # planned | created | reused | failed
+    published_by_tool: bool = False
     students_graded: int = 0
     points_posted: float = 0.0
 
