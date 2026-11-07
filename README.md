@@ -13,6 +13,18 @@ For every assignment you select, the tool:
 3. walks the graded submissions, splits each student's rubric points per CLO, and
    posts the totals as that student's grade in the matching CLO assignment.
 
+### How grades are posted
+
+Grades are sent with the **bulk grading endpoint**
+(`POST /api/v1/courses/:id/assignments/:id/submissions/update_grades`) — **one
+request per assignment** instead of one request per student. Canvas applies them
+in a background job and the tool waits for it to finish, then **reads the grades
+back** so the summary reflects what Canvas actually stored. Students Canvas
+cannot grade (e.g. inactive enrollments, which the per-student endpoint rejects
+with `403 user not authorized to perform that action`) are reported by name.
+If a Canvas server lacks the bulk endpoint, the tool falls back to per-student
+requests automatically.
+
 > **Note on publishing:** Canvas rejects grades on unpublished assignments
 > (403 "This assignment is still unpublished" — `Submission#can_grade_symbolic_status`),
 > so each CLO assignment is **published automatically right before** its grades are
@@ -93,6 +105,12 @@ Tip: run `canvas-clo-split --dry-run` first to see exactly what would be created
 and the projected per-student CLO totals — nothing is written to Canvas.
 
 Exit codes: `0` success, `1` aborted/connection failure, `2` finished with errors.
+
+> **About 403 errors:** Canvas rate limiting answers `429` (the tool retries
+> those automatically). A `403 user not authorized to perform that action` on a
+> grade means Canvas refuses to grade that *student* — typically an inactive or
+> rejected enrollment (e.g. a student who dropped the course). Those students
+> are skipped and reported; nothing else is affected.
 
 ## Development
 

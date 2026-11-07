@@ -55,8 +55,13 @@ class FakeUi(Ui):
 class FakeCanvas:
     """In-memory Canvas API.
 
-    Enforces the real Canvas rule that grades cannot be posted to unpublished
-    assignments (403 "This assignment is still unpublished").
+    Faithful to the behaviors this tool depends on:
+      * grades cannot be posted to unpublished assignments (403);
+      * the single-student PUT refuses some students ("user not authorized")
+        while the bulk endpoint can still grade them (inactive enrollments);
+      * the bulk endpoint (update_grades) silently skips students it cannot see
+        and fails the Progress with a message;
+      * GET .../submissions reflects what was actually stored (for verification).
     """
 
     def __init__(self, *, course_pages, assignments, details, submissions):
@@ -68,6 +73,14 @@ class FakeCanvas:
         self.graded: list[tuple[int, int, str]] = []
         self.published: list[tuple[int, bool]] = []  # (assignment_id, published)
         self.events: list[tuple] = []  # ("publish", id) / ("grade", aid, uid)
+        self.bulk_requests: list[tuple[int, dict[int, str]]] = []
+        self.single_put_calls: int = 0
+        self.bulk_available: bool = True
+        self.inactive_users: set[int] = set()  # single PUT 403s, bulk still grades
+        self.bulk_missing_users: set[int] = set()  # bulk skips them entirely
+        self.posted: dict[int, dict[int, float]] = {}  # aid -> {uid: score}
+        self.progress: dict[int, dict] = {}
+        self._progress_counter = 0
         self.publish_state: dict[int, bool] = {
             int(a["id"]): bool(a.get("published", True))
             for items in assignments.values()
@@ -89,6 +102,11 @@ class FakeCanvas:
                 headers["Link"] = f'<https://canvas.test/api/v1/courses?page={page + 1}>; rel="next"'
             return httpx.Response(200, json=self.course_pages[page - 1], headers=headers)
 
+        match = re.fullmatch(r"/api/v1/progress/(\d+)", path)
+        if match and method == "GET":
+            pid = int(match.group(1))
+            return httpx.Response(200, json=self.progress.get(pid, {"id": pid, "workflow_state": "completed"}))
+
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments", path)
         if match and method == "GET":
             return httpx.Response(200, json=self.assignments.get(int(match.group(1)), []))
@@ -99,6 +117,41 @@ class FakeCanvas:
             self.publish_state[new_id] = form.get("assignment[published]", ["false"])[0] == "true"
             self.events.append(("create", form["assignment[name]"][0]))
             return httpx.Response(200, json={"id": new_id})
+
+        match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)/submissions/update_grades", path)
+        if match and method == "POST":
+            aid = int(match.group(2))
+            if not self.bulk_available:
+                return httpx.Response(404, json={"errors": [{"message": "Not found"}]})
+            if not self.publish_state.get(aid, True):
+                return httpx.Response(
+                    403, json={"errors": [{"message": "user not authorized to perform that action"}]}
+                )
+            form = parse_qs(request.content.decode())
+            grades: dict[int, str] = {}
+            for key, values in form.items():
+                m = re.fullmatch(r"grade_data\[(\d+)\]\[posted_grade\]", key)
+                if m:
+                    grades[int(m.group(1))] = values[0]
+            self.bulk_requests.append((aid, grades))
+            missing = []
+            for uid, grade in grades.items():
+                if uid in self.bulk_missing_users:
+                    missing.append(uid)  # silently skipped, like a hidden student
+                    continue
+                self._apply_grade(aid, uid, grade)
+            self._progress_counter += 1
+            pid = 100 + self._progress_counter
+            if missing:
+                self.progress[pid] = {
+                    "id": pid,
+                    "workflow_state": "failed",
+                    "message": "Couldn't find User(s) with API ids "
+                    + ", ".join(f"'{u}'" for u in missing),
+                }
+            else:
+                self.progress[pid] = {"id": pid, "workflow_state": "completed", "completion": 100}
+            return httpx.Response(200, json={"id": pid, "workflow_state": "queued"})
 
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)", path)
         if match and method == "GET":
@@ -117,11 +170,21 @@ class FakeCanvas:
 
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)/submissions", path)
         if match and method == "GET":
-            return httpx.Response(200, json=self.submissions.get(int(match.group(2)), []))
+            aid = int(match.group(2))
+            if aid in self.submissions:
+                return httpx.Response(200, json=self.submissions[aid])
+            # verification reads for the CLO assignments: what we actually stored
+            rows = [
+                {"user_id": uid, "score": score}
+                for uid, score in sorted(self.posted.get(aid, {}).items())
+            ]
+            return httpx.Response(200, json=rows)
 
         match = re.fullmatch(r"/api/v1/courses/(\d+)/assignments/(\d+)/submissions/(\d+)", path)
         if match and method == "PUT":
             aid = int(match.group(2))
+            uid = int(match.group(3))
+            self.single_put_calls += 1
             if not self.publish_state.get(aid, True):
                 # Canvas's real behavior: grades on unpublished assignments are 403
                 return httpx.Response(
@@ -131,13 +194,25 @@ class FakeCanvas:
                         "error_message": "This assignment is still unpublished",
                     },
                 )
+            if uid in self.inactive_users:
+                return httpx.Response(
+                    403,
+                    json={
+                        "errors": [{"message": "user not authorized to perform that action"}],
+                        "error_message": "user not authorized to perform that action",
+                    },
+                )
             form = parse_qs(request.content.decode())
             grade = form["submission[posted_grade]"][0]
-            self.graded.append((aid, int(match.group(3)), grade))
-            self.events.append(("grade", aid, int(match.group(3))))
+            self._apply_grade(aid, uid, grade)
             return httpx.Response(200, json={"id": 1, "posted_at": "2026-01-01"})
 
         return httpx.Response(404, json={"errors": [{"message": f"unhandled {method} {path}"}]})
+
+    def _apply_grade(self, aid: int, uid: int, grade: str) -> None:
+        self.graded.append((aid, uid, grade))
+        self.events.append(("grade", aid, uid))
+        self.posted.setdefault(aid, {})[uid] = float(grade)
 
 
 def make_args(**overrides):
@@ -346,6 +421,79 @@ def test_403_error_surfaces_canvas_message(monkeypatch):
     message = str(excinfo.value)
     assert "This assignment is still unpublished" in message  # Canvas's own words
     assert "unpublished" in message  # plus the likely-causes hint
+
+
+# --------------------------------------------------------------------------- #
+# bulk grading (one request per assignment)
+# --------------------------------------------------------------------------- #
+
+
+def test_grades_are_posted_in_one_request_per_assignment(monkeypatch):
+    fake = make_canvas()
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+    report = RunReport()
+
+    code = run(ui, make_args(), report)
+
+    assert code == 0
+    # exactly one bulk request per CLO assignment, zero per-student PUTs
+    assert sorted(aid for aid, _grades in fake.bulk_requests) == [501, 502]
+    assert fake.single_put_calls == 0
+    grades_501 = dict(fake.bulk_requests)[501]
+    assert grades_501 == {7: "10", 8: "7.5"}
+    assert report.plans[0].stats.grades_posted == 4
+
+
+def test_bulk_grades_students_the_single_endpoint_refuses(monkeypatch):
+    """The user-visible bug: per-student PUTs 403 on inactive enrollments; bulk can grade them."""
+    fake = make_canvas()
+    fake.inactive_users = {8}  # Sam: "user not authorized" on PUT, gradeable in bulk
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+    report = RunReport()
+
+    code = run(ui, make_args(), report)
+
+    assert code == 0
+    assert (501, 8, "7.5") in fake.graded
+    assert (502, 8, "7.5") in fake.graded
+    stats = report.plans[0].stats
+    assert stats.grades_posted == 4
+    assert stats.grades_failed == 0
+
+
+def test_verification_reports_grades_that_silently_did_not_land(monkeypatch):
+    fake = make_canvas()
+    fake.bulk_missing_users = {8}  # bulk job skips Sam entirely
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+    report = RunReport()
+
+    code = run(ui, make_args(), report)
+
+    assert code == 2
+    stats = report.plans[0].stats
+    assert stats.grades_posted == 2  # Jane's two grades verified
+    assert stats.grades_failed == 2  # Sam's two reported missing
+    errors = report.plans[0].errors
+    assert any("Sam" in e and "not in Canvas" in e and "7.5" in e for e in errors)
+
+
+def test_falls_back_to_per_student_posts_without_bulk_endpoint(monkeypatch):
+    fake = make_canvas()
+    fake.bulk_available = False  # older Canvas: update_grades is missing
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+    report = RunReport()
+
+    code = run(ui, make_args(), report)
+
+    assert code == 0
+    assert fake.single_put_calls == 4
+    assert fake.bulk_requests == []
+    assert any("falling back" in w for w in report.plans[0].warnings)
+    assert report.plans[0].stats.grades_posted == 4
 
 
 def test_dry_run_writes_nothing_but_projects_results(monkeypatch):

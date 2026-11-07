@@ -314,3 +314,62 @@ class CanvasClient:
         )
         payload = self._json(response, self._url(path))
         return payload if isinstance(payload, dict) else {}
+
+    # -- bulk grading ------------------------------------------------------ #
+
+    def bulk_post_grades(
+        self, course_id: int, assignment_id: int, grades: dict[int, float]
+    ) -> dict[str, Any]:
+        """Post every grade of one assignment in a single request.
+
+        Uses POST .../submissions/update_grades with grade_data[<student_id>][posted_grade].
+        Canvas applies the grades in a background job and answers with a Progress
+        object.  Setting the same grade twice is harmless, so retries are safe.
+        """
+        data = {
+            f"grade_data[{user_id}][posted_grade]": format_points(points)
+            for user_id, points in grades.items()
+        }
+        response = self._request(
+            "POST",
+            f"/courses/{course_id}/assignments/{assignment_id}/submissions/update_grades",
+            data=data,
+        )
+        payload = self._json(
+            response, self._url(f"/courses/{course_id}/assignments/{assignment_id}/submissions/update_grades")
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    def wait_for_progress(
+        self, progress_id: int, *, timeout: float = 300.0, interval: float = 1.0
+    ) -> dict[str, Any] | None:
+        """Poll GET /api/v1/progress/:id until the job settles. None on timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            response = self._request("GET", f"/progress/{progress_id}")
+            payload = self._json(response, self._url(f"/progress/{progress_id}"))
+            if isinstance(payload, dict):
+                if str(payload.get("workflow_state") or "") in ("completed", "failed"):
+                    return payload
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(interval)
+
+    def list_submission_scores(
+        self, course_id: int, assignment_id: int
+    ) -> dict[int, float | None]:
+        """Lightweight verification read: user_id -> score for one assignment."""
+        scores: dict[int, float | None] = {}
+        for item in self._paginate(
+            f"/courses/{course_id}/assignments/{assignment_id}/submissions",
+            params={"per_page": PER_PAGE},
+        ):
+            try:
+                user_id = int(item.get("user_id"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                scores[user_id] = float(item.get("score")) if item.get("score") is not None else None
+            except (TypeError, ValueError):
+                scores[user_id] = None
+        return scores

@@ -15,7 +15,7 @@ from rich.panel import Panel
 
 from .api import CanvasClient, normalize_base_url
 from .errors import CanvasAuthError, CanvasError
-from .models import AssignmentPlan, CourseInfo, RunReport
+from .models import AssignmentPlan, AssignmentRunStats, CloTarget, CourseInfo, RunReport
 from .scoring import (
     build_clo_mapping,
     build_targets,
@@ -347,8 +347,92 @@ def execute_plan(
     if not posts_for_grading:
         return
 
-    with ui.progress(len(posts_for_grading), f"Posting grades for '{plan.assignment_name}'") as tick:
-        for target, submission, name, points in posts_for_grading:
+    # 5. post every grade of one assignment in a single request, then verify
+    #    against what Canvas actually stores (one bulk request per assignment
+    #    instead of one request per student).
+    by_target: dict[int, tuple[CloTarget, list[tuple[dict[str, Any], str, float]]]] = {}
+    for target, submission, name, points in posts_for_grading:
+        _t, entries = by_target.setdefault(id(target), (target, []))
+        entries.append((submission, name, points))
+
+    for target, entries in by_target.values():
+        grades = {int(sub.get("user_id")): float(points) for sub, _name, points in entries}
+        try:
+            with ui.status(f"Posting {len(grades)} grade(s) to '{target.name}' …"):
+                progress = client.bulk_post_grades(course_id, int(target.assignment_id), grades)
+        except CanvasError as exc:
+            if getattr(exc, "status", None) in (404, 405):
+                plan.warnings.append(
+                    f"bulk grading is not available on this Canvas ({exc}) — "
+                    f"falling back to one request per student for '{target.name}'"
+                )
+                _post_grades_individually(
+                    ui, client, course_id, target, entries, plan, stats
+                )
+                continue
+            stats.grades_failed += len(entries)
+            plan.errors.append(f"could not post grades to '{target.name}': {exc}")
+            continue
+
+        progress_id = progress.get("id")
+        if progress_id is not None:
+            with ui.status(f"Waiting for Canvas to apply the grades on '{target.name}' …"):
+                final = client.wait_for_progress(int(progress_id))
+            if final is None:
+                plan.warnings.append(
+                    f"Canvas is still applying the grades on '{target.name}' — "
+                    "verify them in the gradebook later"
+                )
+            elif str(final.get("workflow_state")) == "failed" and final.get("message"):
+                plan.warnings.append(
+                    f"Canvas reported a problem on '{target.name}': {final['message']}"
+                )
+
+        # Verify: read back what Canvas stores, so the summary reflects reality
+        # even when Canvas silently skips students (e.g. inactive enrollments).
+        try:
+            with ui.status(f"Verifying grades on '{target.name}' …"):
+                actual = client.list_submission_scores(course_id, int(target.assignment_id))
+        except CanvasError as exc:
+            plan.warnings.append(f"could not verify the grades on '{target.name}': {exc}")
+            actual = {}
+
+        if actual:
+            by_name = {int(sub.get("user_id")): name for sub, name, _p in entries}
+            for user_id, points in grades.items():
+                got = actual.get(user_id)
+                if got is not None and abs(got - points) <= 0.01:
+                    stats.grades_posted += 1
+                    target.students_graded += 1
+                    target.points_posted += points
+                else:
+                    stats.grades_failed += 1
+                    shown = format_points(got) if got is not None else "no score"
+                    plan.errors.append(
+                        f"{by_name.get(user_id, f'user {user_id}')}: {target.clo} = "
+                        f"{format_points(points)} is not in Canvas (it shows {shown}) — "
+                        "the student may not be assignable to this assignment "
+                        "(inactive/rejected enrollment)"
+                    )
+        else:
+            # verification unavailable — trust the submission and say so
+            stats.grades_posted += len(grades)
+            target.students_graded += len(grades)
+            target.points_posted += sum(grades.values())
+
+
+def _post_grades_individually(
+    ui: Ui,
+    client: CanvasClient,
+    course_id: int,
+    target: CloTarget,
+    entries: list[tuple[dict[str, Any], str, float]],
+    plan: AssignmentPlan,
+    stats: AssignmentRunStats,
+) -> None:
+    """Fallback for Canvas servers without the bulk grading endpoint."""
+    with ui.progress(len(entries), f"Posting grades to '{target.name}'") as tick:
+        for submission, name, points in entries:
             try:
                 client.post_grade(
                     course_id, int(target.assignment_id), int(submission.get("user_id")), points
@@ -531,7 +615,8 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
             execute_plan(ui, client, plan, pattern)
 
         render_summary(ui, report)
-        return 2 if report.errors else 0
+        has_errors = bool(report.errors) or any(p.errors for p in report.plans)
+        return 2 if has_errors else 0
 
 
 # --------------------------------------------------------------------------- #
