@@ -345,12 +345,31 @@ def run(ui: Ui, args: argparse.Namespace, report: RunReport | None = None) -> in
         if not courses:
             ui.error("No active courses found for this account.")
             return 1
-        ui.info(f"{len(courses)} active course(s) found")
+        hidden = [c for c in courses if c.archived]
+        selectable = courses if args.all_courses else [c for c in courses if not c.archived]
+        if hidden and not args.all_courses:
+            ui.info(
+                f"{len(selectable)} active course(s) found — {len(hidden)} archived/concluded "
+                "course(s) hidden (use --all-courses to include them)"
+            )
+        else:
+            ui.info(f"{len(selectable)} course(s) found")
+
+        def course_title(course: CourseInfo) -> str:
+            bits = [course.label]
+            if course.term:
+                bits.append(f"— {course.term}")
+            if course.archived:
+                bits.append("[archived]")
+            elif course.workflow_state == "unpublished":
+                bits.append("[unpublished]")
+            return " ".join(bits)
+
         course_ids = ui.checkbox(
             "Which course(s) do you want to process?",
-            [(f"{c.label}{' — ' + c.term if c.term else ''}", c.id) for c in courses],
+            [(course_title(c), c.id) for c in selectable],
         )
-        selected_courses = [c for c in courses if c.id in set(course_ids)]
+        selected_courses = [c for c in selectable if c.id in set(course_ids)]
         if not selected_courses:
             ui.warn("No courses selected — nothing to do.")
             return 0
@@ -478,6 +497,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="build and show the plan without creating assignments or posting grades",
+    )
+    parser.add_argument(
+        "--all-courses",
+        action="store_true",
+        help="also list archived/concluded courses (hidden by default)",
     )
     parser.add_argument("--yes", action="store_true", help="skip the final confirmation prompt")
     return parser.parse_args(argv)

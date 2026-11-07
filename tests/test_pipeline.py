@@ -22,6 +22,7 @@ class FakeUi(Ui):
         super().__init__(console=Console(file=io.StringIO(), width=120))
         self.checkbox_answers = [list(answer) for answer in (checkbox_answers or [])]
         self.seen_choices: list[list] = []
+        self.seen_choice_items: list[list[tuple[str, object]]] = []
 
     def text(self, message, **kwargs):
         raise AssertionError(f"unexpected text prompt: {message}")
@@ -34,6 +35,7 @@ class FakeUi(Ui):
 
     def checkbox(self, message, choices):
         self.seen_choices.append([value for _title, value in choices])
+        self.seen_choice_items.append(list(choices))
         answer = self.checkbox_answers.pop(0)
         values = {value for _title, value in choices}
         assert set(answer) <= values, f"queued {answer} are not all in {sorted(values)}"
@@ -108,6 +110,7 @@ def make_args(**overrides):
         token="token",
         pattern=r"(CLO\s*\d+)",
         dry_run=False,
+        all_courses=False,
         yes=True,
     )
     defaults.update(overrides)
@@ -161,12 +164,13 @@ SUBMISSIONS = [
 ]
 
 
-def make_canvas(extra_assignments=None):
+def make_canvas(extra_assignments=None, course_pages=None):
     assignments = [
         {"id": 10, "name": "Homework 1", "points_possible": 20.0, "rubric": RUBRIC},
     ] + list(extra_assignments or [])
     return FakeCanvas(
-        course_pages=[
+        course_pages=course_pages
+        or [
             [{"id": 1, "name": "Thermo", "course_code": "ENGR101", "workflow_state": "available",
               "term": {"name": "Fall 2026"}}],
             [{"id": 2, "name": "Fluids", "course_code": "ENGR102", "workflow_state": "available"}],
@@ -319,3 +323,56 @@ def test_criteria_without_clo_are_excluded_and_warned(monkeypatch):
     assert any("Teamwork" in w and "matches no CLO" in w for w in report.plans[0].warnings)
     # only the mapped criteria are posted
     assert sorted(fake.graded) == [(501, 7, "10"), (502, 7, "10")]
+
+
+# --------------------------------------------------------------------------- #
+# course visibility (archived / concluded courses)
+# --------------------------------------------------------------------------- #
+
+COURSE_PAGES_WITH_ARCHIVED = [
+    [
+        {"id": 1, "name": "Thermo", "course_code": "ENGR101", "workflow_state": "available",
+         "term": {"name": "Fall 2026"}},
+        {"id": 2, "name": "Old Thermo", "course_code": "ENGR101", "workflow_state": "completed",
+         "term": {"name": "Fall 2024"}, "concluded": True},
+        {"id": 3, "name": "Fluids", "course_code": "ENGR102", "workflow_state": "available"},
+    ],
+]
+
+
+def test_archived_courses_are_hidden_by_default(monkeypatch):
+    fake = make_canvas(course_pages=COURSE_PAGES_WITH_ARCHIVED)
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+
+    code = run(ui, make_args(), RunReport())
+
+    assert code == 0
+    assert ui.seen_choices[0] == [1, 3]  # course 2 (completed/concluded) is not offered
+
+
+def test_all_courses_flag_shows_archived_courses(monkeypatch):
+    fake = make_canvas(course_pages=COURSE_PAGES_WITH_ARCHIVED)
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+
+    code = run(ui, make_args(all_courses=True), RunReport())
+
+    assert code == 0
+    assert ui.seen_choices[0] == [1, 3, 2]  # archived last
+    titles = {value: title for title, value in ui.seen_choice_items[0]}
+    assert "[archived]" in titles[2]
+
+
+def test_unpublished_course_is_shown_and_marked(monkeypatch):
+    fake = make_canvas(course_pages=[[
+        {"id": 1, "name": "Thermo", "course_code": "ENGR101", "workflow_state": "unpublished"},
+    ]])
+    patch_transport(monkeypatch, fake)
+    ui = FakeUi(checkbox_answers=[[1], [10]])
+
+    code = run(ui, make_args(), RunReport())
+
+    assert code == 0
+    assert ui.seen_choices[0] == [1]
+    assert "[unpublished]" in ui.seen_choice_items[0][0][0]

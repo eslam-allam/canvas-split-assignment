@@ -12,6 +12,12 @@ class CourseInfo:
     code: str
     workflow_state: str = ""
     term: str | None = None
+    concluded: bool = False
+
+    @property
+    def archived(self) -> bool:
+        """A course the user would call archived: concluded or completed/deleted."""
+        return self.concluded or self.workflow_state in ("completed", "deleted")
 
     @property
     def label(self) -> str:

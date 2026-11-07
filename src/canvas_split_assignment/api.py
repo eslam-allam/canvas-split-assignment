@@ -236,7 +236,11 @@ class CanvasClient:
     def list_courses(self) -> list[CourseInfo]:
         courses: list[CourseInfo] = []
         for item in self._paginate(
-            "/courses", params={"include[]": ["term", "total_students"], "per_page": PER_PAGE}
+            "/courses",
+            params={
+                "include[]": ["term", "total_students", "concluded"],
+                "per_page": PER_PAGE,
+            },
         ):
             term = item.get("term") if isinstance(item.get("term"), dict) else None
             courses.append(
@@ -246,9 +250,12 @@ class CanvasClient:
                     code=str(item.get("course_code") or ""),
                     workflow_state=str(item.get("workflow_state") or ""),
                     term=str(term.get("name")) if term else None,
+                    concluded=bool(item.get("concluded")),
                 )
             )
-        courses.sort(key=lambda c: (c.term is None, (c.term or "").lower(), c.name.lower()))
+        courses.sort(
+            key=lambda c: (c.archived, c.term is None, (c.term or "").lower(), c.name.lower())
+        )
         return courses
 
     def list_assignments(self, course_id: int) -> list[dict[str, Any]]:

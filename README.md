@@ -63,7 +63,10 @@ You will be prompted for:
    description, e.g. `(CLO\s*\d+)` or `CLO[:\s-]*(\S+)`. Group 1 is used as the
    CLO (the whole match if the pattern has no group). The criterion's
    `description` is tried first, then `long_description`.
-4. **Courses** — multi-select (space to toggle, enter to confirm).
+4. **Courses** — multi-select (space to toggle, enter to confirm). Archived /
+   concluded courses are hidden by default (Canvas returns them for teacher-type
+   accounts; `--all-courses` includes them, marked `[archived]`). Unpublished
+   courses are shown and marked `[unpublished]`.
 5. **Assignments** — multi-select per course; assignments with a rubric are marked.
 
 Then review the plan and confirm. A full summary (created/reused assignments,
@@ -77,6 +80,7 @@ students graded, points posted, warnings, errors) is printed at the end.
 | `--token TOKEN` | Canvas API access token (skips the prompt) |
 | `--pattern REGEX` | CLO capture pattern (skips the prompt) |
 | `--dry-run` | build and show the plan; create/post nothing |
+| `--all-courses` | also list archived/concluded courses (hidden by default) |
 | `--yes` | skip the final confirmation prompt |
 
 Tip: run `canvas-clo-split --dry-run` first to see exactly what would be created.
